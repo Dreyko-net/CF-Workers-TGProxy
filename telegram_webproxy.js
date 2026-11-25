@@ -48,7 +48,8 @@ const i16 = (b, o) => (b[o] | b[o + 1] << 8) << 16 >> 16;
 function headOf(head) { const tag = new DataView(head.buffer, head.byteOffset, head.byteLength).getUint32(56, true); const mode = tag === 0xefefefef ? 0xef : tag === 0xeeeeeeee ? 0xee : tag === 0xdddddddd ? 0xdd : 0; if (!mode) throw Error(); const dc = i16(head, 60); const target = Math.abs(dc) - 1; if (target < 0 || target >= 5) throw Error(); return { mode, target, media: dc < 0 }; }
 function mkHead(mode, target, media) { const head = new Uint8Array(64); do { CRYPTO.getRandomValues(head); } while ( head[0] === 0xef || badHead.has(dec.decode(head.subarray(0, 4))) || head.subarray(4, 8).every(v => v === 0) ); head.fill(mode, 56, 60); new DataView(head.buffer).setInt16(60, (target + 1) * (media ? -1 : 1), true); return head; }
 function getKey(v, keepTag = false) { const str = String(v || '').trim().toLowerCase(); if (!/^(?:[0-9a-f]{32}|(?:dd|ee|ef)[0-9a-f]{32})$/.test(str)) { throw Error(); } return hex(keepTag && str.length === 34 && str.startsWith('dd') ? str : str.slice(-32)); }
-function hostOf(v) { const host = String(v || '').trim().toLowerCase().replace(/\.$/, ''); const labels = host.split('.'); if (!host.includes('.') || host.length > 253 || host.includes(':') || labels.some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) { throw Error(); } return host; }
+//function hostOf(v) { const host = String(v || '').trim().toLowerCase().replace(/\.$/, ''); const labels = host.split('.'); if (!host.includes('.') || host.length > 253 || host.includes(':') || labels.some(label => !/^[a-z0-9](?:[a-z0-9-]{0,61}[a-z0-9])?$/.test(label))) { throw Error(); } return host; }
+function hostOf(v) { return String(v || '').trim().toLowerCase().replace(/\.$/, ''); }
 const macKey = (raw, id) => { let key = macKeys.get(id); if (!key) macKeys.set(id, key = CRYPTO.subtle.importKey('raw', u8(raw), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign'])); return key; };
 const sign = async (key, v) => new Uint8Array(await CRYPTO.subtle.sign('HMAC', await key, u8(v)));
 async function mac(boot, kind, body) { const prefix = txt.encode(`${kind}\n`); const msg = new Uint8Array(prefix.byteLength + body.byteLength); msg.set(prefix); msg.set(body, prefix.byteLength); return (await sign( macKey(txt.encode(boot), `token:${boot}`), msg, )).slice(0, 16); }
@@ -404,8 +405,9 @@ setInterval(updateMetrics, 3000);
 // ======================== 核心路由 ========================
 const route = async (req, env) => {
   const url = new URL(req.url), { pathname: path, origin } = url, { method, headers } = req; let cfg;
-  const host = hostOf(env.public_host || url.hostname);
+  
   try { cfg = mkCfg(env); } catch { return ['/', '/health', '/api/v1/session', '/api/v1/ws'].includes(path) ? reply(null, 500) : reply(); }
+  const host_env = env.public_host;
 
   // 1. 新增：实时统计 API 接口
   if (path === '/api/stats' && method === 'GET') {
@@ -431,14 +433,14 @@ const route = async (req, env) => {
 
   // 2. 根路径：区分 Telegram Client 桥接 vs 普通浏览器访问
   if (path === '/' && (method === 'GET' || method === 'HEAD')) {
-    let host = null;
+    let bridgeHost = null;
     if (method === 'GET') {
-      try { host = await bridge(url, cfg.secret, host); } catch {}
+      try { bridgeHost = await bridge(url, cfg.secret, host_env); } catch {}
     }
     // 如果是 Telegram 客户端带来的带有签名的桥接请求，返回内置代理隧道脚本
-    if (host) {
+    if (bridgeHost) {
       const boot = await mkBoot(cfg.boot);
-      const page = mkPage(host, boot);
+      const page = mkPage(host_env, boot);
       return new Response(page.body, {
         status: 200,
         headers: {
@@ -453,7 +455,7 @@ const route = async (req, env) => {
     // 如果是普通浏览器直接访问根路径，返回高颜值导入与监控看板
     if (method === 'HEAD') return new Response(null, { status: 200 });
     const botName = env.TG_BOT || 'eoops_bot';
-    const dashboardHtml = mkDashboard(url.hostname, cfg.secret, botName);
+    const dashboardHtml = mkDashboard(host_env, cfg.secret, botName);
     return new Response(dashboardHtml, {
       status: 200,
       headers: { 'Content-Type': 'text/html; charset=utf-8' },

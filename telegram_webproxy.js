@@ -64,7 +64,7 @@ function hello(body) { if (body.byteLength !== 9 || body[0] !== 0x10 || body[1] 
 const protos = req => (req.headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map(v => v.trim()).filter(Boolean);
 const mkCfg = ({ SECRET, BOOT }) => { const secret = String(SECRET || '').trim(), boot = String(BOOT || '').trim(); if (!secret) throw Error(); if (!boot) throw Error(); return { secret, key: getKey(secret), boot }; };
 async function mkCap(secret, host) { const key = macKey( getKey(secret, true), `bridge:${String(secret).trim().toLowerCase()}`, ); const sig = await sign( key, txt.encode(`tdesktop-web-proxy-bridge-v1\n${hostOf(host)}`), ); return b64(sig); }
-async function bridge(url, secret) { if (url.pathname !== '/' || url.search.length !== 51) return null; const cand = url.search.slice(8); if (url.search !== `?bridge=${cand}` || !/^[A-Za-z0-9_-]{43}$/.test(cand)) return null; const host = hostOf(url.hostname); const want = await mkCap(secret, host); if (cand.length !== want.length) return null; let diff = 0; for (let i = 0; i < want.length; i++) diff |= cand.charCodeAt(i) ^ want.charCodeAt(i); return diff === 0 ? host : null; }
+async function bridge(url, secret, host) { if (url.pathname !== '/' || url.search.length !== 51) return null; const cand = url.search.slice(8); if (url.search !== `?bridge=${cand}` || !/^[A-Za-z0-9_-]{43}$/.test(cand)) return null; const want = await mkCap(secret, host); if (cand.length !== want.length) return null; let diff = 0; for (let i = 0; i < want.length; i++) diff |= cand.charCodeAt(i) ^ want.charCodeAt(i); return diff === 0 ? host : null; }
 const sha = async v => new Uint8Array(await CRYPTO.subtle.digest('SHA-256', u8(v)));
 function step(ctr, n) { let carry = n; for (let i = ctr.length - 1; i >= 0 && carry; i--) { const next = ctr[i] + (carry & 0xff); ctr[i] = next & 0xff; carry = Math.floor(carry / 256) + Math.floor(next / 256); } if (carry) throw Error(); }
 const mkCtr = (key, ctr) => { let iv = dup(ctr), tail = nil; const ready = CRYPTO.subtle.importKey('raw', u8(key), { name: 'AES-CTR' }, false, ['encrypt']);
@@ -404,6 +404,7 @@ setInterval(updateMetrics, 3000);
 // ======================== 核心路由 ========================
 const route = async (req, env) => {
   const url = new URL(req.url), { pathname: path, origin } = url, { method, headers } = req; let cfg;
+  const host = hostOf(env.public_host || url.hostname);
   try { cfg = mkCfg(env); } catch { return ['/', '/health', '/api/v1/session', '/api/v1/ws'].includes(path) ? reply(null, 500) : reply(); }
 
   // 1. 新增：实时统计 API 接口
@@ -432,7 +433,7 @@ const route = async (req, env) => {
   if (path === '/' && (method === 'GET' || method === 'HEAD')) {
     let host = null;
     if (method === 'GET') {
-      try { host = await bridge(url, cfg.secret); } catch {}
+      try { host = await bridge(url, cfg.secret, host); } catch {}
     }
     // 如果是 Telegram 客户端带来的带有签名的桥接请求，返回内置代理隧道脚本
     if (host) {
